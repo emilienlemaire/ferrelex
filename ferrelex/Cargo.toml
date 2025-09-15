@@ -1,0 +1,8 @@
+[package]
+name = "ferrelex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ferrelex_core = { path = "../ferrelex_core" }
+ferrelex_macro = { path = "../ferrelex_macro" }
