@@ -2,7 +2,6 @@ use decision_tree::DecisionTree;
 use ferrelex_core::cset::CSet;
 use proc_macro::TokenStream;
 use quote::{ToTokens, format_ident, quote};
-use regex::{Regex, compile, regex_of_expr, regex_of_pattern};
 use rustc_hash::FxHashMap;
 use std::{
     cell::RefCell,
@@ -13,9 +12,10 @@ use std::{
     },
 };
 use syn::{
-    Arm, Attribute, Expr, ExprMatch, ExprPath, File, Ident, ItemFn, Pat, Stmt,
-    Type, TypePath, parse_macro_input, parse_quote,
+    Arm, Attribute, Expr, ExprMatch, ExprPath, File, FnArg, Ident, ItemFn, Pat, PatType, Stmt, Type, TypePath, parse_macro_input, parse_quote
 };
+
+use crate::regex::{Regex, compile, regex_of_expr, regex_of_pattern};
 
 mod decision_tree;
 mod regex;
@@ -32,14 +32,8 @@ static TABLES: LazyLock<Mutex<FxHashMap<Vec<isize>, String>>> =
 
 static TABLE_COUNTER: LazyLock<AtomicIsize> = LazyLock::new(|| AtomicIsize::new(0));
 
-fn best_final(finals: &Vec<bool>) -> Option<isize> {
-    let mut fin = None;
-    for i in finals.len() - 1..=0 {
-        if finals[i] {
-            fin = Some(i as isize)
-        }
-    }
-    fin
+fn best_final(finals: &Vec<bool>) -> Option<usize> {
+    finals.iter().position(|&f| f)
 }
 
 fn appfun(fun: &Ident, args: Vec<TokenStream>) -> TokenStream {
@@ -140,18 +134,20 @@ fn get_tables() -> Vec<(String, Vec<isize>)> {
 
 fn gen_state(
     lexbuf: &Ident,
+    lexbuf_type: &Type,
     auto: &Vec<(Vec<(CSet, isize)>, Vec<bool>)>,
     i: isize,
     elt: (Vec<(CSet, isize)>, Vec<bool>),
 ) -> TokenStream {
+    dbg!(i);
     let (trans, final_) = elt;
     let (partition, _): (Vec<_>, Vec<_>) = trans.clone().into_iter().unzip();
-    let cases: Vec<_> = trans
+    let mut cases: Vec<_> = trans
         .clone()
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(i, (_, j))| {
-            let e: proc_macro2::TokenStream = call_state(lexbuf, auto, j).into();
+            let e: proc_macro2::TokenStream = call_state(lexbuf, auto, *j).into();
             let i_isize = i as isize;
             quote! { #i_isize => { #e } }
         })
@@ -162,7 +158,6 @@ fn gen_state(
             vec![quote! { #lexbuf.next_int() }.into()],
         )
         .into();
-        let mut cases = cases.clone();
         cases.push(quote! { _ => { #lexbuf.backtrack() }});
         quote! {
             match #matched_expr {
@@ -170,35 +165,43 @@ fn gen_state(
             }
         }
     };
-    fn ret(body: proc_macro2::TokenStream, lexbuf: &Ident, i: isize) -> TokenStream {
+
+    let ret = |
+        body: proc_macro2::TokenStream,
+    | -> TokenStream {
         let name = state_fun(i);
-        quote! {fn #name(#lexbuf: ferrelex::Lexbuf) -> isize {
+        quote! {fn #name(#lexbuf: #lexbuf_type) -> isize {
             #body
         }}
         .into()
-    }
+    };
+
     match best_final(&final_) {
-        None => ret(body.clone(), lexbuf, i),
+        None => ret(body),
         Some(_) if trans.len() == 0 => quote! {}.into(),
         Some(i) => {
-            let body = body.clone();
+            dbg!(i);
+            let i = i as isize;
             ret(
                 quote! {
                     #lexbuf.mark(#i);
                     #body
                 }
                 .into(),
-                lexbuf,
-                i,
             )
         }
     }
 }
 
-fn gen_definition(lexbuf: &Ident, l: Vec<(Regex, TokenStream)>, error: TokenStream) -> TokenStream {
+fn gen_definition(
+    lexbuf: &Ident,
+    lexbuf_type: &Type,
+    l: Vec<(Regex, TokenStream)>,
+    error: TokenStream,
+) -> TokenStream {
     let compiled_regex = {
         let (fst, _): (Vec<_>, Vec<_>) = l.clone().into_iter().unzip();
-        compile(fst)
+        compile(fst.as_slice())
     };
     let mut cases: Vec<proc_macro2::TokenStream> = l
         .iter()
@@ -212,7 +215,16 @@ fn gen_definition(lexbuf: &Ident, l: Vec<(Regex, TokenStream)>, error: TokenStre
     let states: Vec<proc_macro2::TokenStream> = compiled_regex
         .iter()
         .enumerate()
-        .map(|(i, elt)| gen_state(lexbuf, &compiled_regex, i as isize, elt.clone()).into())
+        .map(|(i, elt)| {
+            gen_state(
+                lexbuf,
+                lexbuf_type,
+                &compiled_regex,
+                i as isize,
+                elt.clone(),
+            )
+            .into()
+        })
         .collect();
     let state_0: proc_macro2::TokenStream =
         appfun(&state_fun(0), vec![quote! {#lexbuf}.into()]).into();
@@ -228,79 +240,109 @@ fn gen_definition(lexbuf: &Ident, l: Vec<(Regex, TokenStream)>, error: TokenStre
     .into()
 }
 
-fn expression(env: Rc<RefCell<Env>>, expr: &Expr) -> TokenStream {
+fn expression(env: Rc<RefCell<Env>>, expr: &Expr, args: &[&FnArg]) -> TokenStream {
     match expr {
-        Expr::Match(expr_match) => match expr_match {
-            ExprMatch {
+        Expr::Match(expr_match) => {
+            let ExprMatch {
                 expr, arms, attrs, ..
-            } => {
-                if attrs.contains((&parse_quote! {#[lexer]}) as &Attribute) {
-                    match *expr.clone() {
-                        Expr::Path(ExprPath {
-                            qself: None, path, ..
-                        }) => {
-                            if path.segments.len() != 1 {
-                                return syn::Error::new_spanned(
-                                    expr,
-                                    "expecting only an identifier to matched against \
-                                    regexs.",
-                                )
-                                .to_compile_error()
-                                .into();
-                            }
-                            let lexbuf = &path.segments[0].ident.clone();
-                            let error = match arms.last() {
-                                Some(Arm {
-                                    pat: Pat::Wild(_),
-                                    body: expr,
-                                    guard: None,
-                                    ..
-                                }) => expression(env.clone(), expr.as_ref()),
-                                _ => {
-                                    return syn::Error::new_spanned(
-                                        expr.clone(),
-                                        "expecting a wildcard for error handling as last \
-                                    match arm.",
-                                    )
-                                    .to_compile_error()
-                                    .into();
-                                }
-                            };
-
-                            let cases: Result<Vec<(Regex, TokenStream)>, _> = arms
-                                [0..arms.len() - 1]
-                                .iter()
-                                .map(|arm| match arm {
-                                    Arm { guard: Some(_), .. } => {
-                                        Err(syn::Error::new_spanned(arm, "guard are not supported"))
-                                    }
-                                    Arm { pat, body, .. } => Ok((
-                                        regex_of_pattern(env.clone(), pat.clone())?,
-                                        expression(env.clone(), body.as_ref()),
-                                    )),
-                                })
-                                .collect();
-                            match cases {
-                                Ok(cases) => gen_definition(lexbuf, cases, error),
-                                Err(e) => return e.to_compile_error().into(),
-                            }
-                        }
-                        _ => {
+            } = expr_match;
+            if attrs.contains((&parse_quote! {#[lexer]}) as &Attribute) {
+                match *expr.clone() {
+                    Expr::Path(ExprPath {
+                        qself: None, path, ..
+                    }) => {
+                        if path.segments.len() != 1 {
                             return syn::Error::new_spanned(
                                 expr,
-                                "expecting only an identifier to matched against regexs.",
+                                "expecting only an identifier to matched against \
+                                regexs.",
                             )
                             .to_compile_error()
                             .into();
                         }
+                        let lexbuf = &path.segments[0].ident.clone();
+                        let error = match arms.last() {
+                            Some(Arm {
+                                pat: Pat::Wild(_),
+                                body: expr,
+                                guard: None,
+                                ..
+                            }) => expression(env.clone(), expr.as_ref(), args),
+                            _ => {
+                                return syn::Error::new_spanned(
+                                    expr.clone(),
+                                    "expecting a wildcard for error handling as last \
+                                match arm.",
+                                )
+                                .to_compile_error()
+                                .into();
+                            }
+                        };
+
+                        let cases: Result<Vec<(Regex, TokenStream)>, _> = arms[0..arms.len() - 1]
+                            .iter()
+                            .map(|arm| match arm {
+                                Arm { guard: Some(_), .. } => {
+                                    Err(syn::Error::new_spanned(arm, "guard are not supported"))
+                                }
+                                Arm { pat, body, .. } => Ok((
+                                    regex_of_pattern(env.clone(), pat.clone())?,
+                                    expression(env.clone(), body.as_ref(), args),
+                                )),
+                            })
+                            .collect();
+                        match cases {
+                            Ok(cases) => {
+                                let lexbuf_type = args.iter().find_map(|fn_arg| {
+                                    match fn_arg {
+                                        FnArg::Typed(PatType {pat, ty, ..}) => {
+                                            match pat.as_ref() {
+                                                Pat::Ident(pat_ident) => {
+                                                    if &pat_ident.ident == lexbuf {
+                                                        Some (ty)
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                                _ => None
+                                            }
+                                        }
+                                        _ => None
+                                    }
+                                });
+                                match lexbuf_type {
+                                    Some(ty) => gen_definition(lexbuf, &*ty, cases, error),
+                                    None =>
+                                        return syn::Error::new_spanned(
+                                            lexbuf,
+                                            &format!("could not find `{}` in fn parameters.", lexbuf)
+                                        ).to_compile_error().into()
+
+                                }
+                            },
+                            Err(e) => return e.to_compile_error().into(),
+                        }
                     }
-                } else {
-                    expr.to_token_stream().into()
+                    _ => {
+                        return syn::Error::new_spanned(
+                            expr,
+                            "expecting only an identifier to matched against regexs.",
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
                 }
+            } else {
+                expr.to_token_stream().into()
             }
-        },
+        }
         _ => expr.to_token_stream().into(),
     }
+}
+
+#[proc_macro_attribute]
+pub fn lexbuf(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 #[proc_macro]
@@ -330,15 +372,16 @@ pub fn lex(input: TokenStream) -> TokenStream {
                 }
             },
             syn::Item::Fn(ItemFn {
-                vis,
-                sig,
-                attrs,
-                block,
+                ref vis,
+                ref sig,
+                ref attrs,
+                ref block,
             }) => {
                 let mut new_block = quote! {};
+                let args: Vec<&FnArg> = sig.inputs.iter().collect();
                 block.stmts.iter().for_each(|stmt| match stmt {
                     Stmt::Expr(e, semi) => {
-                        let e = expression(env.clone(), e);
+                        let e = expression(env.clone(), e, &args);
                         new_block.extend(proc_macro2::TokenStream::from(e));
                         if let Some(semi) = semi {
                             new_block.extend(semi.into_token_stream());
@@ -347,9 +390,9 @@ pub fn lex(input: TokenStream) -> TokenStream {
                     stmt => new_block.extend(stmt.into_token_stream()),
                 });
                 let new_fun = ItemFn {
-                    vis,
-                    sig,
-                    attrs,
+                    vis: vis.clone(),
+                    sig: sig.clone(),
+                    attrs: attrs.clone(),
                     block: Box::new(parse_quote! { { #new_block } }),
                 };
                 res.extend(new_fun.into_token_stream());
@@ -380,38 +423,3 @@ pub fn lex(input: TokenStream) -> TokenStream {
     .into()
 }
 
-#[cfg(test)]
-mod tests {
-static __ferrelex_table_3: &str = "\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\0\0\0\0\0\0\0\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}\u{1}";
-fn __ferrelex_partition_2(c: isize) -> isize {
-    -1isize
-}
-fn __ferrelex_partition_1(c: isize) -> isize {
-    if c < 64isize {
-        -1isize
-    } else {
-        if c < 121isize {
-            (__ferrelex_table_3
-                .chars()
-                .nth((c - 65isize))
-                .expect("to be checked before")
-                .into() - 1)
-        } else {
-            -1isize
-        }
-    }
-}
-pub fn lex(lexbuf: ferrelex::Lexbuf) {
-    fn __ferrelex_state_0(lexbuf: ferrelex::LexBuf) -> isize {
-        match __ferrelex_partition_1(lexbuf.next_int()) {
-            0isize => 0isize,
-            _ => lexbuf.backtrack(),
-        }
-    }
-    lexbuf.start();
-    match __ferrelex_state_0(lexbuf) {
-        0isize => {}
-        _ => {}
-    }
-}
-}

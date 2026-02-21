@@ -1,9 +1,9 @@
 [workspace]
 
 members = [
-  "examples/lexer",
   "ferrelex",
   "ferrelex_core",
-  "ferrelex_macro"
+  "ferrelex_macro",
+  "ferrelex_gen"
 ]
 resolver = "3"

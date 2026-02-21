@@ -124,6 +124,32 @@ impl TryFrom<Vec<(isize, isize)>> for CSet {
     }
 }
 
+impl TryFrom<&[(isize, isize)]> for CSet {
+    type Error = String;
+
+    /// NOTE: This will allocate a vector if the ranges are valid.
+    fn try_from(value: &[(isize, isize)]) -> Result<Self, Self::Error> {
+        let mut prev = -1;
+        for (a, b) in value {
+            if (*a as i64) < prev {
+                return Err(format!(
+                    "Vec not in an increasing order: found [_, (_, {prev}), ({a}, {b})]"
+                ));
+            }
+            if (*a as i64) == prev {
+                return Err(format!(
+                    "Found an adjacent range: [_, (_, {prev}), ({a}, {b})]"
+                ));
+            }
+            if a > b {
+                return Err(format!("Found an malformed range: [_, ({a}, {b})]"));
+            }
+            prev = *b as i64;
+        }
+        Ok(CSet(value.to_vec()))
+    }
+}
+
 #[allow(clippy::from_over_into)] // I don't want to impl `From<CSet>` for `Vec<(isize, isize)>`.
 impl Into<Vec<(isize, isize)>> for CSet {
     fn into(self) -> Vec<(isize, isize)> {
