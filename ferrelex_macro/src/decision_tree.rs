@@ -24,7 +24,11 @@ fn segments_of_partitions(partitions: &Vec<CSet>) -> Vec<(isize, isize, isize)> 
 #[derive(Debug, Clone)]
 pub(crate) enum DecisionTree {
     Lte(isize, Rc<DecisionTree>, Rc<DecisionTree>),
-    Table(isize, Vec<isize>),
+    /// Dense lookup table.
+    /// `offset` is the minimum character code subtracted before indexing.
+    /// Each stored byte `v` encodes partition `base + v - 1`; `0` means no match.
+    /// The runtime expression is `table[c - offset] as isize + base - 1`.
+    Table(isize, Vec<u8>, isize),
     Return(isize),
 }
 
@@ -32,7 +36,7 @@ impl DecisionTree {
     pub fn simplify_decision_tree(self: Rc<Self>) -> Rc<Self> {
         use DecisionTree::*;
         match self.as_ref() {
-            Table(_, _) | Return(_) => self.clone(),
+            Table(_, _, _) | Return(_) => self.clone(),
             Lte(i, l, r) => match (l.as_ref(), r.as_ref()) {
                 (Return(a), Return(b)) if a == b => l.clone(),
                 _ => {
@@ -60,6 +64,10 @@ impl DecisionTree {
             let mut res = vec![];
             for elts in l.chunks(2) {
                 let (a1, b1, d1) = &elts[0];
+                if elts.len() == 1 {
+                    res.push((*a1, *b1, d1.clone()));
+                    continue;
+                }
                 let (a2, b2, d2) = &elts[1];
                 let x = if b1 + 1 == *a2 {
                     d2.clone()
@@ -67,9 +75,6 @@ impl DecisionTree {
                     Rc::new(Lte(a2 - 1, Rc::new(Return(-1)), d2.clone()))
                 };
                 res.push((*a1, *b2, Rc::new(Lte(*b1, d1.clone(), x.clone()))))
-            }
-            if l.len() % 2 == 1 {
-                res.push(l[l.len() - 1].clone())
             }
             res
         }
@@ -94,11 +99,26 @@ impl DecisionTree {
         }
     }
 
-    fn _decision_table(l: Vec<(isize, isize, isize)>) -> Self {
+    /// Build the subtree for segments that overflowed the current table.
+    ///
+    /// Once `b >= LIMIT` appears in the sorted list all subsequent segments
+    /// also exceed the limit, so we fall back to a binary decision tree.
+    /// Otherwise every remaining segment can form the next table (O(1) lookup
+    /// vs O(log n) comparisons), with partition indices offset by `base + 255`.
+    fn rest_tree(rest: &[(isize, isize, isize)], base: isize) -> Self {
+        use DecisionTree::*;
+        match rest.first() {
+            None => Return(-1),
+            Some(&(_, b, _)) if b >= LIMIT => Self::decision(rest),
+            _ => Self::_decision_table(rest.to_vec(), base + 255),
+        }
+    }
+
+    fn _decision_table(l: Vec<(isize, isize, isize)>, base: isize) -> Self {
         use DecisionTree::*;
         let split = l
             .iter()
-            .position(|&(_, b, i)| b >= LIMIT || i >= 255)
+            .position(|&(_, b, i)| b >= LIMIT || i - base >= 255)
             .unwrap_or(l.len());
 
         let table = &l[..split];
@@ -109,16 +129,20 @@ impl DecisionTree {
             &[(min, max, i)] => Lte(
                 min - 1,
                 Rc::new(Return(-1)),
-                Rc::new(Lte(max, Rc::new(Return(i)), Rc::new(Self::decision(rest)))),
+                Rc::new(Lte(
+                    max,
+                    Rc::new(Return(i)),
+                    Rc::new(Self::rest_tree(rest, base)),
+                )),
             ),
             _ => {
                 let min = table.iter().map(|&(a, _, _)| a).min().unwrap();
                 let max = table.last().unwrap().1;
 
-                let mut arr = vec![0isize; (max - min + 1) as usize];
+                let mut arr = vec![0u8; (max - min + 1) as usize];
                 for &(a, b, i) in table {
                     for j in a..=b {
-                        arr[(j - min) as usize] = i + 1;
+                        arr[(j - min) as usize] = ((i - base) as u8).strict_add(1);
                     }
                 }
 
@@ -127,8 +151,8 @@ impl DecisionTree {
                     Rc::new(Return(-1)),
                     Rc::new(Lte(
                         max,
-                        Rc::new(Table(min, arr)),
-                        Rc::new(Self::decision(rest)),
+                        Rc::new(Table(min, arr, base)),
+                        Rc::new(Self::rest_tree(rest, base)),
                     )),
                 )
             }
@@ -154,7 +178,7 @@ impl DecisionTree {
     }
 
     pub fn decision_table(p: &Vec<CSet>) -> Rc<Self> {
-        let decision_table = Rc::new(Self::_decision_table(segments_of_partitions(p)));
+        let decision_table = Rc::new(Self::_decision_table(segments_of_partitions(p), 0));
         decision_table.simplify(-1, CSet::max_code())
     }
 
@@ -175,14 +199,18 @@ impl DecisionTree {
             Return(i) => {
                 quote! { #i }
             }
-            Table(offset, t) => {
+            Table(offset, t, base) => {
                 let c = if *offset == 0 {
                     quote! {(c)}
                 } else {
                     quote! {(c - #offset)}
                 };
                 let table_name = table_name(&t);
-                quote! { (#table_name.chars().nth(#c as usize).expect("to be checked before") as isize - 1)}
+                if *base == 0 {
+                    quote! { (#table_name[#c as usize] as isize - 1) }
+                } else {
+                    quote! { (#table_name[#c as usize] as isize + #base - 1) }
+                }
             }
         }
     }

@@ -569,7 +569,7 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
             }
         } // Expr::Call
         Expr::Range(ExprRange {
-            start, limits, end, ..
+            start, limits: _, end, ..
         }) => match (start, end) {
             (Some(start), Some(end)) => match (*start, *end) {
                 (
@@ -588,12 +588,7 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                         ));
                     }
                     let i1 = c1 as u8 as isize;
-                    let i2 = c2 as u8 as isize
-                        - if let RangeLimits::HalfOpen(_) = limits {
-                            1
-                        } else {
-                            0
-                        };
+                    let i2 = c2 as u8 as isize;
                     let set = CSet::interval(i1, i2);
                     Ok(Regex::chars(set.clone()))
                 }
@@ -623,12 +618,6 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                                 "Invalid Unicode character code: {i2:0x4}",
                             ));
                         }
-                        let i2 = i2
-                            - if let RangeLimits::HalfOpen(_) = limits {
-                                1
-                            } else {
-                                0
-                            };
                         Ok(Regex::chars(CSet::interval(i1, i2)))
                     }
                     (Err(e), _) | (_, Err(e)) => Err(syn::Error::new_spanned(
@@ -979,7 +968,7 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
             }
         } // Expr::Call
         Pat::Range(PatRange {
-            start, limits, end, ..
+            start, limits: _, end, ..
         }) => match (start, end) {
             (Some(start), Some(end)) => match (*start, *end) {
                 (
@@ -998,12 +987,7 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                         ));
                     }
                     let i1 = c1 as u8 as isize;
-                    let i2 = c2 as u8 as isize
-                        - if let RangeLimits::HalfOpen(_) = limits {
-                            1
-                        } else {
-                            0
-                        };
+                    let i2 = c2 as u8 as isize;
                     let set = CSet::interval(i1, i2);
                     Ok(Regex::chars(set))
                 }
@@ -1033,12 +1017,6 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                                 "Invalid Unicode character code: {i2:0x4}",
                             ));
                         }
-                        let i2 = i2
-                            - if let RangeLimits::HalfOpen(_) = limits {
-                                1
-                            } else {
-                                0
-                            };
                         Ok(Regex::chars(CSet::interval(i1, i2)))
                     }
                     (Err(e), _) | (_, Err(e)) => Err(syn::Error::new_spanned(

@@ -27,7 +27,7 @@ static PARTITIONS: LazyLock<Mutex<FxHashMap<Vec<CSet>, String>>> =
 
 static PARTITION_COUNTER: LazyLock<AtomicIsize> = LazyLock::new(|| AtomicIsize::new(0));
 
-static TABLES: LazyLock<Mutex<FxHashMap<Vec<isize>, String>>> =
+static TABLES: LazyLock<Mutex<FxHashMap<Vec<u8>, String>>> =
     LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
 static TABLE_COUNTER: LazyLock<AtomicIsize> = LazyLock::new(|| AtomicIsize::new(0));
@@ -99,7 +99,7 @@ fn partition(name: &String, p: &Vec<CSet>) -> proc_macro2::TokenStream {
     .into()
 }
 
-pub(crate) fn table_name(t: &Vec<isize>) -> Ident {
+pub(crate) fn table_name(t: &Vec<u8>) -> Ident {
     let mut tables = TABLES.lock().expect("to not be locked.");
     match tables.get(t) {
         None => {
@@ -115,19 +115,12 @@ pub(crate) fn table_name(t: &Vec<isize>) -> Ident {
     }
 }
 
-fn table(name: &String, t: &Vec<isize>) -> proc_macro2::TokenStream {
-    let s: String = t
-        .into_iter()
-        .map(|i| *i as u8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .map(|u| u as char)
-        .collect();
+fn table(name: &String, t: &Vec<u8>) -> proc_macro2::TokenStream {
     let name = format_ident!("{name}");
-    quote! { static #name: &str = #s; }
+    quote! { static #name: &[u8] = &[#(#t,)*]; }
 }
 
-fn get_tables() -> Vec<(String, Vec<isize>)> {
+fn get_tables() -> Vec<(String, Vec<u8>)> {
     let tables = TABLES.lock().expect("to be lockable");
     tables.iter().map(|(k, v)| (v.clone(), k.clone())).collect()
 }
@@ -139,7 +132,6 @@ fn gen_state(
     i: isize,
     elt: (Vec<(CSet, isize)>, Vec<bool>),
 ) -> TokenStream {
-    dbg!(i);
     let (trans, final_) = elt;
     let (partition, _): (Vec<_>, Vec<_>) = trans.clone().into_iter().unzip();
     let mut cases: Vec<_> = trans

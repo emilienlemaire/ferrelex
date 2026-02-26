@@ -8,42 +8,39 @@ struct Utf8DecodeError {
     pub bad_byte: u8,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct Pos {
-    offset: usize,
-    bytes_offset: usize,
-    pos: usize,
-    bytes_pos: usize,
-    bol: usize,
-    bytes_bol: usize,
-    line: usize,
-}
-
 pub struct LexBuf<R: Refiller> {
     buf: Vec<u8>,
     len: usize,
-    curr_pos: Pos,
-    start_pos: Pos,
-    marked_pos: Pos,
+    // Hot fields: one usize copy per mark/backtrack/start call.
+    curr_bytes: usize,
+    start_bytes: usize,
+    marked_bytes: usize,
     marked_val: isize,
     chunk_size: usize,
     filename: PathBuf,
     finished: bool,
     refiller: R,
+    // Diagnostic fields — never touched by the generated state machine.
+    line: usize,
+    bytes_bol: usize,    // buffer-relative byte index of the current line start
+    bytes_offset: usize, // cumulative byte shift accumulated across refill compactions
 }
 
 impl<R: Refiller + std::fmt::Debug> std::fmt::Debug for LexBuf<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LexBuf")
             .field("len", &self.len)
-            .field("curr_pos", &self.curr_pos)
-            .field("start_pos", &self.start_pos)
-            .field("marked_pos", &self.marked_pos)
+            .field("curr_bytes", &self.curr_bytes)
+            .field("start_bytes", &self.start_bytes)
+            .field("marked_bytes", &self.marked_bytes)
             .field("marked_val", &self.marked_val)
             .field("chunk_size", &self.chunk_size)
             .field("filename", &self.filename)
             .field("finished", &self.finished)
             .field("refiller", &self.refiller)
+            .field("line", &self.line)
+            .field("bytes_bol", &self.bytes_bol)
+            .field("bytes_offset", &self.bytes_offset)
             .finish()
     }
 }
@@ -61,36 +58,38 @@ where
         Self {
             buf: vec![0u8; cap],
             len: 0,
-            curr_pos: Default::default(),
-            start_pos: Default::default(),
-            marked_pos: Default::default(),
+            curr_bytes: 0,
+            start_bytes: 0,
+            marked_bytes: 0,
             marked_val: 0,
             filename: PathBuf::from(""),
             chunk_size,
             finished: false,
             refiller,
+            line: 0,
+            bytes_bol: 0,
+            bytes_offset: 0,
         }
     }
 
     pub fn mark(&mut self, marked_val: isize) {
-        self.marked_pos = self.curr_pos;
+        self.marked_bytes = self.curr_bytes;
         self.marked_val = marked_val;
     }
 
     pub fn start(&mut self) {
-        self.start_pos = self.curr_pos;
+        self.start_bytes = self.curr_bytes;
         self.mark(-1);
     }
 
     pub fn backtrack(&mut self) -> isize {
-        self.curr_pos = self.marked_pos;
+        self.curr_bytes = self.marked_bytes;
         self.marked_val
     }
 
     fn refill(&mut self) {
         if self.len + self.chunk_size > self.buf.len() {
-            let start = self.start_pos.pos;
-            let start_bytes = self.start_pos.bytes_pos;
+            let start_bytes = self.start_bytes;
             let len_from_start = self.len.saturating_sub(start_bytes);
             if len_from_start + self.chunk_size <= self.buf.len() {
                 self.buf.copy_within(start_bytes..start_bytes + len_from_start, 0);
@@ -100,14 +99,11 @@ where
                 self.buf.copy_within(start_bytes..start_bytes + len_from_start, 0);
             }
             self.len = len_from_start;
-            self.curr_pos.offset += start;
-            self.curr_pos.bytes_offset += start_bytes;
-            self.curr_pos.pos = self.curr_pos.pos.saturating_sub(start);
-            self.curr_pos.bytes_pos = self.curr_pos.bytes_pos.saturating_sub(start_bytes);
-            self.marked_pos.pos = self.marked_pos.pos.saturating_sub(start);
-            self.marked_pos.bytes_pos = self.marked_pos.bytes_pos.saturating_sub(start_bytes);
-            self.start_pos.pos = 0;
-            self.start_pos.bytes_pos = 0;
+            self.bytes_offset += start_bytes;
+            self.curr_bytes = self.curr_bytes.saturating_sub(start_bytes);
+            self.marked_bytes = self.marked_bytes.saturating_sub(start_bytes);
+            self.bytes_bol = self.bytes_bol.saturating_sub(start_bytes);
+            self.start_bytes = 0;
         }
         let n = self.refiller.refill(
             &mut self.buf[self.len..self.len + self.chunk_size],
@@ -121,24 +117,22 @@ where
     }
 
     pub fn new_line(&mut self) {
-        self.curr_pos.line += 1;
-        self.curr_pos.bol = self.curr_pos.pos + self.curr_pos.offset;
-        self.curr_pos.bytes_bol = self.curr_pos.bytes_pos + self.curr_pos.bytes_offset;
+        self.line += 1;
+        self.bytes_bol = self.curr_bytes;
     }
 
     #[inline]
     fn decode_next_char_utf8(&mut self) -> Option<Result<char, Utf8DecodeError>> {
-        if self.curr_pos.bytes_pos >= self.len {
+        if self.curr_bytes >= self.len {
             return None;
         }
 
-        let p = self.curr_pos.bytes_pos;
+        let p = self.curr_bytes;
         let b0 = self.buf[p];
 
         // ASCII fast path
         if b0 < 0x80 {
-            self.curr_pos.bytes_pos += 1;
-            self.curr_pos.pos += 1;
+            self.curr_bytes += 1;
             return Some(Ok(b0 as char));
         }
 
@@ -232,17 +226,16 @@ where
         }
 
         let ch = unsafe { char::from_u32_unchecked(cp) };
-        self.curr_pos.bytes_pos += width;
-        self.curr_pos.pos += 1;
+        self.curr_bytes += width;
         Some(Ok(ch))
     }
 
     pub fn next_int(&mut self) -> isize {
         loop {
-            if !self.finished && self.curr_pos.bytes_pos == self.len {
+            if !self.finished && self.curr_bytes == self.len {
                 self.refill();
             }
-            if self.finished && self.curr_pos.bytes_pos == self.len {
+            if self.finished && self.curr_bytes == self.len {
                 break -1;
             } else {
                 match self.decode_next_char_utf8() {
@@ -268,10 +261,10 @@ where
 
     pub fn next(&mut self) -> Option<char> {
         loop {
-            if !self.finished && self.curr_pos.bytes_pos == self.len {
+            if !self.finished && self.curr_bytes == self.len {
                 self.refill();
             }
-            if self.finished && self.curr_pos.bytes_pos == self.len {
+            if self.finished && self.curr_bytes == self.len {
                 break None;
             } else {
                 match self.decode_next_char_utf8() {
@@ -293,9 +286,7 @@ where
     }
 
     pub fn lexeme(&self) -> Result<String, FromUtf8Error> {
-        String::from_utf8(
-            self.buf[self.start_pos.bytes_pos..self.curr_pos.bytes_pos].to_vec(),
-        )
+        String::from_utf8(self.buf[self.start_bytes..self.curr_bytes].to_vec())
     }
 }
 
