@@ -4,11 +4,7 @@
 // ferrelex Generated Code Exception. See the LICENSE file at the root
 // of this repository for the full license text and exception terms.
 
-pub mod char_cache;
-pub mod cset;
-pub mod input;
-pub mod lexbuf;
-pub mod location;
-pub mod refiller;
-pub mod unicode_categories;
-pub mod unicode_props;
+#[test]
+fn macrotest() {
+    macrotest::expand("tests/expand/*.rs");
+}

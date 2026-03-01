@@ -2,7 +2,14 @@
 name = "ferrelex"
 version = "0.1.0"
 edition = "2024"
+description = "Write lexers using familiar Rust match syntax — patterns are compiled at build time"
+keywords = ["lexer", "lexical-analysis", "procedural-macro", "parsing"]
+categories = ["parsing", "text-processing", "development-tools::procedural-macro-helpers"]
 
 [dependencies]
 ferrelex_core = { path = "../ferrelex_core" }
 ferrelex_macro = { path = "../ferrelex_macro" }
+
+[dev-dependencies]
+macrotest = "1"
+trybuild = { version = "1", features = ["diff"] }

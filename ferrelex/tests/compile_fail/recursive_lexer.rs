@@ -4,18 +4,19 @@
 // ferrelex Generated Code Exception. See the LICENSE file at the root
 // of this repository for the full license text and exception terms.
 
-use ferrelex_macro::lex;
+use ferrelex::{lexbuf::utf8::LexBuf, lexer::lex};
 
 lex! {
-    const ASCII_LETTERS: Regex = ('a'..'z') | ('A'..'Z');
-    struct Hello;
-    pub fn lex(lexbuf: ferrelex::lexbuf::utf8::LexBuf) {
+    const IDENT: Regex = Plus(('a'..='z') | ('A'..='Z'));
+
+    pub fn lex_recursive(lexbuf: &mut LexBuf) -> String {
         #[lexer]
         match lexbuf {
-            ASCII_LETTER => (),
+            IDENT => lexbuf.lexeme() + &lex_recursive(lexbuf),
+            eof => String::new(),
+            _ => String::new(),
         }
     }
 }
 
 fn main() {}
-

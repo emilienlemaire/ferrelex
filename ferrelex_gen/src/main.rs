@@ -1,12 +1,16 @@
+// Copyright (c) 2025-2026 Emilien Lemaire <emilien.lem@icloud.com>
+// SPDX-License-Identifier: LGPL-3.0-only
+// Licensed under the GNU Lesser General Public License v3.0, with the
+// ferrelex Generated Code Exception. See the LICENSE file at the root
+// of this repository for the full license text and exception terms.
+
 use std::collections::BTreeMap;
 use std::fs;
 
-const URL_PROPS: &str =
-    "https://www.unicode.org/Public/latest/ucd/DerivedCoreProperties.txt";
+const URL_PROPS: &str = "https://www.unicode.org/Public/latest/ucd/DerivedCoreProperties.txt";
 const URL_CATS: &str =
     "https://www.unicode.org/Public/latest/ucd/extracted/DerivedGeneralCategory.txt";
-const URL_ALIASES: &str =
-    "https://www.unicode.org/Public/latest/ucd/PropertyValueAliases.txt";
+const URL_ALIASES: &str = "https://www.unicode.org/Public/latest/ucd/PropertyValueAliases.txt";
 
 const OUT_PROPS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -23,11 +27,10 @@ const GENERATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// All Rust keywords (strict + reserved) that cannot be bare function names.
 const RUST_KEYWORDS: &[&str] = &[
-    "as", "break", "const", "continue", "crate", "else", "enum", "extern",
-    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
-    "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super",
-    "trait", "true", "type", "unsafe", "use", "where", "while", "async",
-    "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro",
     "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
 ];
 
@@ -68,8 +71,8 @@ fn run_generator(
     println!("--- {url}");
     let content = fetch(url);
 
-    let version = extract_file_version(&content)
-        .unwrap_or_else(|| panic!("could not find version in {url}"));
+    let version =
+        extract_file_version(&content).unwrap_or_else(|| panic!("could not find version in {url}"));
 
     if !needs_update(out_path, &version) {
         return;
@@ -115,7 +118,10 @@ fn run_categories_generator() {
     );
     generated.push_str(&generate_group_fns(&groups, &alias_docs));
     generated.push_str(&generate_from_name(
-        props.keys().map(String::as_str).chain(groups.keys().map(String::as_str)),
+        props
+            .keys()
+            .map(String::as_str)
+            .chain(groups.keys().map(String::as_str)),
     ));
 
     fs::write(OUT_CATS, generated).expect("failed to write unicode_categories.rs");
@@ -150,21 +156,15 @@ fn needs_update(out_path: &str, version: &str) -> bool {
             .map(|l| l[GENERATOR_MARKER.len()..].trim().to_owned());
 
         match (existing_unicode, existing_gen) {
-            (Some(ref uv), Some(ref gv))
-                if uv == version && gv == GENERATOR_VERSION =>
-            {
+            (Some(ref uv), Some(ref gv)) if uv == version && gv == GENERATOR_VERSION => {
                 println!("Already up to date (Unicode {version}, generator {GENERATOR_VERSION}).");
                 return false;
             }
             (Some(ref uv), Some(ref gv)) => {
-                println!(
-                    "Updating Unicode {uv}→{version}, generator {gv}→{GENERATOR_VERSION}."
-                );
+                println!("Updating Unicode {uv}→{version}, generator {gv}→{GENERATOR_VERSION}.");
             }
             _ => {
-                println!(
-                    "Generating Unicode {version} (generator {GENERATOR_VERSION})."
-                );
+                println!("Generating Unicode {version} (generator {GENERATOR_VERSION}).");
             }
         }
     } else {
@@ -365,9 +365,9 @@ fn generate_group_fns(
         let member_fns: Vec<String> = members.iter().map(|m| prop_name_to_fn_name(m)).collect();
 
         let first = &member_fns[0];
-        let union_expr = member_fns[1..]
-            .iter()
-            .fold(format!("{first}()"), |acc, m| format!("{acc}.union(&{m}())"));
+        let union_expr = member_fns[1..].iter().fold(format!("{first}()"), |acc, m| {
+            format!("{acc}.union(&{m}())")
+        });
 
         out.push('\n');
         out.push_str(&format!("/// Unicode general category group `{group}`.\n"));
@@ -383,10 +383,7 @@ fn generate_group_fns(
                 }
             }
         }
-        out.push_str(&format!(
-            "/// Equivalent to: {}\n",
-            members.join(" + ")
-        ));
+        out.push_str(&format!("/// Equivalent to: {}\n", members.join(" + ")));
         out.push_str(&format!("pub fn {fn_name}() -> CSet {{\n"));
         out.push_str(&format!("    {union_expr}\n"));
         out.push_str("}\n");
@@ -434,7 +431,10 @@ fn parse_properties(content: &str) -> BTreeMap<String, Vec<(u32, u32)>> {
             (cp, cp)
         };
 
-        props.entry(prop_name.to_owned()).or_default().push((lo, hi));
+        props
+            .entry(prop_name.to_owned())
+            .or_default()
+            .push((lo, hi));
     }
 
     props
@@ -470,7 +470,13 @@ fn merge_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
 fn prop_name_to_fn_name(name: &str) -> String {
     let mut fn_name: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .to_lowercase();
 
@@ -541,7 +547,7 @@ fn generate_rust(
         out.push_str(&format!("pub fn {fn_name}() -> CSet {{\n"));
         out.push_str("    CSet::try_from([\n");
         for (lo, hi) in &ranges {
-            out.push_str(&format!("        (0x{lo:04X}isize, 0x{hi:04X}isize),\n"));
+            out.push_str(&format!("        (0x{lo:04X}i32, 0x{hi:04X}i32),\n"));
         }
         out.push_str("    ].as_slice()).expect(\"valid generated Unicode data\")\n");
         out.push_str("}\n");

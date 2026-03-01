@@ -1,0 +1,5 @@
+error: recursive call to `lex_recursive` in a `#[lexer]` match arm will stack-overflow on long inputs; use `loop { #[lexer] match ... }` instead, or suppress this error with `#[lexer(allow_recursion)]`
+  --> tests/compile_fail/recursive_lexer.rs:15:41
+   |
+15 |             IDENT => lexbuf.lexeme() + &lex_recursive(lexbuf),
+   |                                         ^^^^^^^^^^^^^^^^^^^^^

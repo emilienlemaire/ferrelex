@@ -1,23 +1,37 @@
+// Copyright (c) 2025-2026 Emilien Lemaire <emilien.lem@icloud.com>
+// SPDX-License-Identifier: LGPL-3.0-only
+// Licensed under the GNU Lesser General Public License v3.0, with the
+// ferrelex Generated Code Exception. See the LICENSE file at the root
+// of this repository for the full license text and exception terms.
+
 extern crate ferrelex;
 
-use ferrelex::{lexbuf::{lexbuf::utf8::LexBuf, refiller::Utf8Refiller}, lexer};
+use ferrelex::{
+    lexbuf::{utf8::LexBuf, refiller::Utf8Refiller},
+    lexer,
+};
 
 #[derive(Debug)]
 enum Token {
     Ascii(String),
     Lambda(String),
-    Invalid
+    Eof,
+    Invalid,
 }
 
-lexer::lex!{
+lexer::lex! {
     const ASCII_LETTERS: Regex = ('a'..'z') | ('A'..'Z');
     const LAMBDA: Regex = "λ";
     pub fn lex(lexbuf: &mut LexBuf) -> Token {
         #[lexer]
         match lexbuf {
-            ASCII_LETTERS => Token::Ascii(lexbuf.lexeme().unwrap()) ,
-            LAMBDA => Token::Lambda(lexbuf.lexeme().unwrap()),
-            _ => Token::Invalid
+            ASCII_LETTERS => Token::Ascii(lexbuf.lexeme()) ,
+            LAMBDA => Token::Lambda(lexbuf.lexeme()),
+            eof => Token::Eof,
+            _ => {
+                let _ = lexbuf.lexeme();
+                Token::Invalid
+            },
         }
     }
 }

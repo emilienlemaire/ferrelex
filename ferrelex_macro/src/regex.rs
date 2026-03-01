@@ -1,7 +1,13 @@
+// Copyright (c) 2025-2026 Emilien Lemaire <emilien.lem@icloud.com>
+// SPDX-License-Identifier: LGPL-3.0-only
+// Licensed under the GNU Lesser General Public License v3.0, with the
+// ferrelex Generated Code Exception. See the LICENSE file at the root
+// of this repository for the full license text and exception terms.
+
 use std::{cell::RefCell, rc::Rc};
 
 use ferrelex_core::cset::CSet;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use syn::{
     BinOp, Expr, ExprBinary, ExprCall, ExprLit, ExprParen, ExprPath, ExprRange, ExprTuple, Lit,
     Pat, PatIdent, PatLit, PatOr, PatParen, PatRange, PatTuple, PatTupleStruct, Path, RangeLimits,
@@ -26,7 +32,11 @@ impl Regex {
     }
 
     pub(crate) fn seq(self, r: Self) -> Self {
-        Self::Seq(Box::new(self), Box::new(r))
+        match (self, r) {
+            (Self::Eps, r) => r,
+            (s, Self::Eps) => s,
+            (s, r) => Self::Seq(Box::new(s), Box::new(r)),
+        }
     }
 
     pub fn chars(c: CSet) -> Self {
@@ -55,7 +65,7 @@ impl Regex {
         }
     }
 
-    pub(crate) fn substract(&self, r: &Self) -> Option<Self> {
+    pub(crate) fn subtract(&self, r: &Self) -> Option<Self> {
         match (self, r) {
             (Self::Chars(c1), Self::Chars(c2)) => Some(Self::Chars(c1.difference(c2))),
             _ => None,
@@ -81,12 +91,18 @@ impl Regex {
                 res
             }
             (m, n) => {
-                let mut res = self.clone();
+                // Build r^m (mandatory prefix)
+                let mut mandatory = self.clone();
                 for _ in 1..m {
-                    let new = self.clone().seq(res);
-                    res = new;
+                    mandatory = self.clone().seq(mandatory);
                 }
-                res.repeat(0, n - m)
+                // Append r{0, n-m} optional tail using the original atom, not
+                // the accumulated mandatory part (which was the prior bug).
+                if n == m {
+                    mandatory
+                } else {
+                    mandatory.seq(self.repeat(0, n - m))
+                }
             }
         }
     }
@@ -129,6 +145,13 @@ impl Nfa {
         (start, final_node)
     }
 
+    /// Recursively build an NFA sub-graph for `re` and return its start node.
+    ///
+    /// `succ` is the NFA node that every accepting path through the sub-graph must
+    /// eventually reach — the *continuation* in a continuation-passing idiom inherited
+    /// from the original OCaml source. Sequences are built right-to-left: `Seq(r1, r2)`
+    /// first builds `r2` (with the original `succ`), then builds `r1` with the start of
+    /// `r2` as its new successor.
     fn build(&mut self, re: &Regex, succ: NodeId) -> NodeId {
         match re {
             Regex::Eps => succ,
@@ -181,25 +204,34 @@ impl Nfa {
         }
     }
 
-    fn add_node(&self, state: &mut Vec<NodeId>, id: NodeId) {
-        match state.binary_search(&id) {
-            Ok(_) => return,
-            Err(pos) => state.insert(pos, id),
+    fn add_node(&self, visited: &mut FxHashSet<NodeId>, id: NodeId) {
+        if !visited.insert(id) {
+            return;
         }
 
         for &eps_id in &self.0[id].eps {
-            self.add_node(state, eps_id);
+            self.add_node(visited, eps_id);
         }
     }
 
     fn add_nodes(&self, ids: &[NodeId]) -> Vec<NodeId> {
-        let mut state = vec![];
+        let mut visited: FxHashSet<NodeId> = Default::default();
         for &id in ids {
-            self.add_node(&mut state, id);
+            self.add_node(&mut visited, id);
         }
+
+        let mut state: Vec<NodeId> = visited.into_iter().collect();
+        state.sort_unstable();
         state
     }
 
+    /// Compute all outgoing transitions for an NFA *state set* (a DFA state).
+    ///
+    /// Collects every character-transition reachable from any node in `state`,
+    /// then partitions the combined character space so that each returned
+    /// `(CSet, target_state)` pair covers a maximal set of code points that all
+    /// lead to exactly the same epsilon-closed target node set. This is the
+    /// core of the standard subset construction step.
     fn transition(&self, state: &[NodeId]) -> Vec<(CSet, Vec<NodeId>)> {
         let mut trans: Vec<_> = state
             .iter()
@@ -255,21 +287,33 @@ impl Nfa {
     }
 }
 
-pub(super) fn compile(regexs: &[Regex]) -> Vec<(Vec<(CSet, isize)>, Vec<bool>)> {
+/// Compile a slice of regexes into a DFA via NFA subset construction.
+///
+/// Each entry in `regexs` corresponds to one match arm (in source order). The function:
+/// 1. Converts every regex to an NFA sub-graph sharing one arena.
+/// 2. Runs the standard subset construction (BFS worklist) to enumerate DFA states.
+/// 3. Returns one entry per DFA state as `(transitions, accepting_flags)`:
+///    - `transitions`: `(CSet, next_state)` pairs — the character classes that lead
+///      out of this state and the index of the target state.
+///    - `accepting_flags[i]`: `true` when this DFA state contains the accepting node
+///      of regex `i`, meaning the DFA accepts pattern `i` here.
+///
+/// State 0 is always the initial state.
+pub(super) fn compile(regexs: &[Regex]) -> Vec<(Vec<(CSet, i32)>, Vec<bool>)> {
     let mut nfa = Nfa::new();
 
     let compiled: Vec<(NodeId, NodeId)> = regexs.iter().map(|re| nfa.compile_re(re)).collect();
 
-    let mut state_map: FxHashMap<Vec<NodeId>, isize> = Default::default();
+    let mut state_map: FxHashMap<Vec<NodeId>, i32> = Default::default();
     let mut worklist: Vec<Vec<NodeId>> = vec![];
-    let mut states_def: Vec<(Vec<(CSet, isize)>, Vec<bool>)> = vec![];
+    let mut states_def: Vec<(Vec<(CSet, i32)>, Vec<bool>)> = vec![];
 
     let intern = |state: Vec<NodeId>,
                   worklist: &mut Vec<Vec<NodeId>>,
-                  states_def: &mut Vec<(Vec<(CSet, isize)>, Vec<bool>)>,
-                  state_map: &mut FxHashMap<Vec<NodeId>, isize>|
-     -> isize {
-        let next = state_map.len() as isize;
+                  states_def: &mut Vec<(Vec<(CSet, i32)>, Vec<bool>)>,
+                  state_map: &mut FxHashMap<Vec<NodeId>, i32>|
+     -> i32 {
+        let next = state_map.len() as i32;
         *state_map.entry(state.clone()).or_insert_with(|| {
             worklist.push(state);
             states_def.push((vec![], vec![]));
@@ -294,7 +338,7 @@ pub(super) fn compile(regexs: &[Regex]) -> Vec<(Vec<(CSet, isize)>, Vec<bool>)> 
             .collect();
         let finals: Vec<_> = compiled
             .iter()
-            .map(|(_, f)| worklist[cursor].contains(f))
+            .map(|(_, f)| worklist[cursor].binary_search(f).is_ok())
             .collect();
         states_def[cursor] = (trans, finals);
         cursor += 1;
@@ -303,10 +347,49 @@ pub(super) fn compile(regexs: &[Regex]) -> Vec<(Vec<(CSet, isize)>, Vec<bool>)> 
     states_def
 }
 
+/// Recursively expand every `Chars` leaf in `r` to include case variants.
+/// Used when `#[lexer(case_insensitive)]` is set.
+pub(super) fn case_fold_regex(r: Regex) -> Regex {
+    match r {
+        Regex::Chars(c) => Regex::Chars(c.case_fold()),
+        Regex::Seq(a, b) => {
+            Regex::Seq(Box::new(case_fold_regex(*a)), Box::new(case_fold_regex(*b)))
+        }
+        Regex::Alt(a, b) => {
+            Regex::Alt(Box::new(case_fold_regex(*a)), Box::new(case_fold_regex(*b)))
+        }
+        Regex::Rep(r) => Regex::Rep(Box::new(case_fold_regex(*r))),
+        Regex::Plus(r) => Regex::Plus(Box::new(case_fold_regex(*r))),
+        Regex::Eps => Regex::Eps,
+    }
+}
+
 pub(super) fn builtin_regex() -> Env {
     let mut regex: FxHashMap<String, Regex> = FxHashMap::default();
     regex.insert("any".into(), Regex::chars(CSet::any()));
     regex.insert("eof".into(), Regex::chars(CSet::eof()));
+
+    // ASCII-only character class shorthands (suffix _ascii makes the scope explicit;
+    // Unicode equivalents are accessible via Unicode category/property identifiers).
+    let digit_ascii = CSet::interval('0' as i32, '9' as i32);
+    let upper_ascii = CSet::interval('A' as i32, 'Z' as i32);
+    let lower_ascii = CSet::interval('a' as i32, 'z' as i32);
+    let alpha_ascii = upper_ascii.union(&lower_ascii);
+    let alnum_ascii = alpha_ascii.union(&digit_ascii);
+    let whitespace_ascii = CSet::singleton(' ' as i32)
+        .union(&CSet::singleton('\t' as i32))
+        .union(&CSet::singleton('\n' as i32))
+        .union(&CSet::singleton('\r' as i32));
+    let word_ascii = alnum_ascii.union(&CSet::singleton('_' as i32));
+
+    regex.insert("digit_ascii".into(), Regex::chars(digit_ascii));
+    regex.insert("upper_ascii".into(), Regex::chars(upper_ascii));
+    regex.insert("lower_ascii".into(), Regex::chars(lower_ascii));
+    regex.insert("alpha_ascii".into(), Regex::chars(alpha_ascii));
+    regex.insert("alnum_ascii".into(), Regex::chars(alnum_ascii));
+    regex.insert("whitespace_ascii".into(), Regex::chars(whitespace_ascii));
+    regex.insert("word_ascii".into(), Regex::chars(word_ascii));
+
     regex
 }
 
@@ -421,12 +504,10 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                                         Ok(rep)
                                     }
                                     (Err(e), _) | (_, Err(e)) => {
-                                        let err_string = e.to_string();
                                         Err(syn::Error::new_spanned(
                                             args[1].clone(),
                                             format!(
-                                                "Could not parse integer literal as `usize` value: {}",
-                                                &err_string
+                                                "Could not parse integer literal as `usize` value: {e}",
                                             ),
                                         ))
                                     }
@@ -455,12 +536,10 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                             ..
                         }) => match lit_int.base10_parse::<usize>() {
                             Err(e) => {
-                                let err_string = e.to_string();
                                 Err(syn::Error::new_spanned(
                                     args[1].clone(),
                                     format!(
-                                        "Could not parse integer literal as `usize` value: {}",
-                                        &err_string
+                                        "Could not parse integer literal as `usize` value: {e}",
                                     ),
                                 ))
                             }
@@ -507,16 +586,16 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                     if args.len() != 2 {
                         return Err(syn::Error::new_spanned(
                             args.clone(),
-                            "`Sub` operator is expecting two arguements",
+                            "`Sub` operator is expecting two arguments",
                         ));
                     }
                     let r1 = regex_of_expr(env.clone(), args[0].clone())?;
                     let r2 = regex_of_expr(env.clone(), args[1].clone())?;
-                    match r1.substract(&r2) {
+                    match r1.subtract(&r2) {
                         Some(r) => Ok(r),
                         None => Err(syn::Error::new_spanned(
                             args,
-                            "`Sub` operator can only be applied to single character length regexs",
+                            "`Sub` operator can only be applied to single character length regexes",
                         )),
                     }
                 }
@@ -524,7 +603,7 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                     if args.len() != 2 {
                         return Err(syn::Error::new_spanned(
                             args.clone(),
-                            "`Intersect` operator is expecting two arguements",
+                            "`Intersect` operator is expecting two arguments",
                         ));
                     }
                     let r1 = regex_of_expr(env.clone(), args[0].clone())?;
@@ -533,15 +612,15 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                         Some(r) => Ok(r),
                         None => Err(syn::Error::new_spanned(
                             args,
-                            "`Intersect` operator can only be applied to signle character length regexs",
+                            "`Intersect` operator can only be applied to single character length regexes",
                         )),
                     }
                 }
-                e if e == parse_quote! {Chars} => {
+                e if e == parse_quote! {AnyOf} || e == parse_quote! {Chars} => {
                     if args.len() > 1 {
                         return Err(syn::Error::new_spanned(
                             args,
-                            "`Chars` operator only accepts one arguement.",
+                            "`AnyOf` operator only accepts one argument.",
                         ));
                     }
                     match &args[0] {
@@ -551,14 +630,14 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                         }) => {
                             let string = lit_str.value();
                             let c = string
-                                .bytes()
-                                .map(|b| CSet::singleton(b.into()))
+                                .chars()
+                                .map(|c| CSet::singleton(c as i32))
                                 .fold(CSet::new(), |acc, s| acc.union(&s));
                             Ok(Regex::chars(c))
                         }
                         _ => Err(syn::Error::new_spanned(
                             args,
-                            "`Chars` operator only accepts str literal as argument.",
+                            "`AnyOf` operator only accepts a str literal as argument.",
                         )),
                     }
                 }
@@ -569,7 +648,7 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
             }
         } // Expr::Call
         Expr::Range(ExprRange {
-            start, limits: _, end, ..
+            start, limits, end, ..
         }) => match (start, end) {
             (Some(start), Some(end)) => match (*start, *end) {
                 (
@@ -581,16 +660,20 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                     }),
                 ) => {
                     let (c1, c2) = (c1.value(), c2.value());
-                    if c1.len_utf8() > 1 || c2.len_utf8() > 1 {
+                    let i1 = c1 as i32;
+                    let i2_raw = c2 as i32;
+                    let i2 = if let RangeLimits::HalfOpen(_) = limits {
+                        i2_raw - 1
+                    } else {
+                        i2_raw
+                    };
+                    if i2 < i1 {
                         return Err(syn::Error::new_spanned(
                             expr.clone(),
-                            "A character range expect only one byte characters as bounds.",
+                            "Empty character range.",
                         ));
                     }
-                    let i1 = c1 as u8 as isize;
-                    let i2 = c2 as u8 as isize;
-                    let set = CSet::interval(i1, i2);
-                    Ok(Regex::chars(set.clone()))
+                    Ok(Regex::chars(CSet::interval(i1, i2)))
                 }
                 (
                     Expr::Lit(ExprLit {
@@ -601,30 +684,34 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                         lit: Lit::Int(i2_lit),
                         ..
                     }),
-                ) => match (
-                    i1_lit.base10_parse::<isize>(),
-                    i2_lit.base10_parse::<isize>(),
-                ) {
-                    (Ok(i1), Ok(i2)) => {
+                ) => match (i1_lit.base10_parse::<i32>(), i2_lit.base10_parse::<i32>()) {
+                    (Ok(i1), Ok(i2_raw)) => {
                         if i1 < 0 || i1 > CSet::max_code() {
                             return Err(syn::Error::new_spanned(
                                 i1_lit.clone(),
                                 "Invalid Unicode character code: {i1:0x4}",
                             ));
                         }
-                        if i2 < 0 || i2 > CSet::max_code() {
+                        if i2_raw < 0 || i2_raw > CSet::max_code() {
                             return Err(syn::Error::new_spanned(
                                 i2_lit.clone(),
-                                "Invalid Unicode character code: {i2:0x4}",
+                                "Invalid Unicode character code: {i2_raw:0x4}",
                             ));
+                        }
+                        let i2 = if let RangeLimits::HalfOpen(_) = limits {
+                            i2_raw - 1
+                        } else {
+                            i2_raw
+                        };
+                        if i2 < i1 {
+                            return Err(syn::Error::new_spanned(expr, "Empty character range."));
                         }
                         Ok(Regex::chars(CSet::interval(i1, i2)))
                     }
                     (Err(e), _) | (_, Err(e)) => Err(syn::Error::new_spanned(
                         expr,
                         format!(
-                            "An integer range should have integer parsable as `isize`: {}",
-                            e.to_string()
+                            "An integer range should have integer parsable as `i32`: {e}",
                         ),
                     )),
                 },
@@ -642,16 +729,16 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
             Lit::Str(lit_str) => Ok(lit_str
                 .value()
                 .chars()
-                .map(|i| CSet::singleton(i as isize))
+                .map(|i| CSet::singleton(i as i32))
                 .fold(Regex::Eps, |acc, s| {
                     let c = Regex::chars(s);
                     acc.seq(c)
                 })),
             Lit::Char(lit_char) => {
                 let c = lit_char.value();
-                Ok(Regex::chars(CSet::singleton(c as isize)))
+                Ok(Regex::chars(CSet::singleton(c as i32)))
             }
-            Lit::Int(lit_int) => match lit_int.base10_parse::<isize>() {
+            Lit::Int(lit_int) => match lit_int.base10_parse::<i32>() {
                 Ok(c) => {
                     if c < 0 || c > CSet::max_code() {
                         return Err(syn::Error::new_spanned(
@@ -664,8 +751,7 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
                 Err(e) => Err(syn::Error::new_spanned(
                     lit_int,
                     format!(
-                        "Expecting int in regex to be parsable as `isize` ({}).",
-                        e.to_string()
+                        "Expecting int in regex to be parsable as `i32` ({e}).",
                     ),
                 )),
             },
@@ -710,6 +796,12 @@ pub(super) fn regex_of_expr(env: Rc<RefCell<Env>>, expr: Expr) -> Result<Regex, 
     }
 }
 
+/// Pattern-context counterpart of [`regex_of_expr`].
+///
+/// Handles the same set of operators (`Star`, `Plus`, `Rep`, `Opt`, `Compl`,
+/// `Sub`, `Intersect`, `AnyOf`, ranges, literals, and identifiers) but operates
+/// on [`syn::Pat`] nodes instead of [`syn::Expr`] nodes, so that regex constants
+/// can be referenced inside `match` arm patterns.
 pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex, syn::Error> {
     match pat.clone() {
         Pat::Paren(PatParen { pat, .. }) => regex_of_pattern(env.clone(), *pat),
@@ -820,12 +912,10 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                                         Ok(rep)
                                     }
                                     (Err(e), _) | (_, Err(e)) => {
-                                        let err_string = e.to_string();
                                         Err(syn::Error::new_spanned(
                                             elems[1].clone(),
                                             format!(
-                                                "Could not parse integer literal as `usize` value: {}",
-                                                &err_string
+                                                "Could not parse integer literal as `usize` value: {e}",
                                             ),
                                         ))
                                     }
@@ -854,12 +944,10 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                             ..
                         }) => match lit_int.base10_parse::<usize>() {
                             Err(e) => {
-                                let err_string = e.to_string();
                                 Err(syn::Error::new_spanned(
                                     elems[1].clone(),
                                     format!(
-                                        "Could not parse integer literal as `usize` value: {}",
-                                        &err_string
+                                        "Could not parse integer literal as `usize` value: {e}",
                                     ),
                                 ))
                             }
@@ -906,16 +994,16 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                     if elems.len() != 2 {
                         return Err(syn::Error::new_spanned(
                             elems.clone(),
-                            "`Sub` operator is expecting two arguements",
+                            "`Sub` operator is expecting two arguments",
                         ));
                     }
                     let r1 = regex_of_pattern(env.clone(), elems[0].clone())?;
                     let r2 = regex_of_pattern(env.clone(), elems[1].clone())?;
-                    match r1.substract(&r2) {
+                    match r1.subtract(&r2) {
                         Some(r) => Ok(r),
                         None => Err(syn::Error::new_spanned(
                             elems,
-                            "`Sub` operator can only be applied to single character length regexs",
+                            "`Sub` operator can only be applied to single character length regexes",
                         )),
                     }
                 }
@@ -923,7 +1011,7 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                     if elems.len() != 2 {
                         return Err(syn::Error::new_spanned(
                             elems.clone(),
-                            "`Intersect` operator is expecting two arguements",
+                            "`Intersect` operator is expecting two arguments",
                         ));
                     }
                     let r1 = regex_of_pattern(env.clone(), elems[0].clone())?;
@@ -932,15 +1020,15 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                         Some(r) => Ok(r),
                         None => Err(syn::Error::new_spanned(
                             elems,
-                            "`Intersect` operator can only be applied to signle character length regexs",
+                            "`Intersect` operator can only be applied to single character length regexes",
                         )),
                     }
                 }
-                e if e == parse_quote! {Chars} => {
+                e if e == parse_quote! {AnyOf} || e == parse_quote! {Chars} => {
                     if elems.len() > 1 {
                         return Err(syn::Error::new_spanned(
                             elems,
-                            "`Chars` operator only accepts one arguement.",
+                            "`AnyOf` operator only accepts one argument.",
                         ));
                     }
                     match &elems[0] {
@@ -950,14 +1038,14 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                         }) => {
                             let string = lit_str.value();
                             let c = string
-                                .bytes()
-                                .map(|b| CSet::singleton(b.into()))
+                                .chars()
+                                .map(|c| CSet::singleton(c as i32))
                                 .fold(CSet::new(), |acc, s| acc.union(&s));
                             Ok(Regex::chars(c))
                         }
                         _ => Err(syn::Error::new_spanned(
                             elems,
-                            "`Chars` operator only accepts str literal as argument.",
+                            "`AnyOf` operator only accepts a str literal as argument.",
                         )),
                     }
                 }
@@ -968,7 +1056,7 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
             }
         } // Expr::Call
         Pat::Range(PatRange {
-            start, limits: _, end, ..
+            start, limits, end, ..
         }) => match (start, end) {
             (Some(start), Some(end)) => match (*start, *end) {
                 (
@@ -980,16 +1068,20 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                     }),
                 ) => {
                     let (c1, c2) = (c1.value(), c2.value());
-                    if c1.len_utf8() > 1 || c2.len_utf8() > 1 {
+                    let i1 = c1 as i32;
+                    let i2_raw = c2 as i32;
+                    let i2 = if let RangeLimits::HalfOpen(_) = limits {
+                        i2_raw - 1
+                    } else {
+                        i2_raw
+                    };
+                    if i2 < i1 {
                         return Err(syn::Error::new_spanned(
                             pat.clone(),
-                            "A character range expect only one byte characters as bounds.",
+                            "Empty character range.",
                         ));
                     }
-                    let i1 = c1 as u8 as isize;
-                    let i2 = c2 as u8 as isize;
-                    let set = CSet::interval(i1, i2);
-                    Ok(Regex::chars(set))
+                    Ok(Regex::chars(CSet::interval(i1, i2)))
                 }
                 (
                     Expr::Lit(PatLit {
@@ -1000,21 +1092,29 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                         lit: Lit::Int(i2_lit),
                         ..
                     }),
-                ) => match (
-                    i1_lit.base10_parse::<isize>(),
-                    i2_lit.base10_parse::<isize>(),
-                ) {
-                    (Ok(i1), Ok(i2)) => {
+                ) => match (i1_lit.base10_parse::<i32>(), i2_lit.base10_parse::<i32>()) {
+                    (Ok(i1), Ok(i2_raw)) => {
                         if i1 < 0 || i1 > CSet::max_code() {
                             return Err(syn::Error::new_spanned(
                                 i1_lit.clone(),
                                 "Invalid Unicode character code: {i1:0x4}",
                             ));
                         }
-                        if i2 < 0 || i2 > CSet::max_code() {
+                        if i2_raw < 0 || i2_raw > CSet::max_code() {
                             return Err(syn::Error::new_spanned(
                                 i2_lit.clone(),
-                                "Invalid Unicode character code: {i2:0x4}",
+                                "Invalid Unicode character code: {i2_raw:0x4}",
+                            ));
+                        }
+                        let i2 = if let RangeLimits::HalfOpen(_) = limits {
+                            i2_raw - 1
+                        } else {
+                            i2_raw
+                        };
+                        if i2 < i1 {
+                            return Err(syn::Error::new_spanned(
+                                pat.clone(),
+                                "Empty character range.",
                             ));
                         }
                         Ok(Regex::chars(CSet::interval(i1, i2)))
@@ -1022,8 +1122,7 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                     (Err(e), _) | (_, Err(e)) => Err(syn::Error::new_spanned(
                         pat,
                         format!(
-                            "An integer range should have integer parsable as `isize`: {}",
-                            e.to_string()
+                            "An integer range should have integer parsable as `i32`: {e}",
                         ),
                     )),
                 },
@@ -1040,23 +1139,17 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
         Pat::Lit(PatLit { lit, .. }) => match lit {
             Lit::Str(lit_str) => Ok(lit_str
                 .value()
-                .bytes()
-                .map(|i| CSet::singleton(i.into()))
+                .chars()
+                .map(|c| CSet::singleton(c as i32))
                 .fold(Regex::eps(), |acc, s| {
                     let c = Regex::chars(s);
                     acc.seq(c)
                 })),
             Lit::Char(lit_char) => {
-                if lit_char.value().len_utf8() > 1 {
-                    return Err(syn::Error::new_spanned(
-                        lit_char,
-                        "Expecting chars of one code point in regex.",
-                    ));
-                }
                 let c = lit_char.value();
-                Ok(Regex::chars(CSet::singleton(c as isize)))
+                Ok(Regex::chars(CSet::singleton(c as i32)))
             }
-            Lit::Int(lit_int) => match lit_int.base10_parse::<isize>() {
+            Lit::Int(lit_int) => match lit_int.base10_parse::<i32>() {
                 Ok(c) => {
                     if c < 0 || c > CSet::max_code() {
                         return Err(syn::Error::new_spanned(
@@ -1069,8 +1162,7 @@ pub(super) fn regex_of_pattern(env: Rc<RefCell<Env>>, pat: Pat) -> Result<Regex,
                 Err(e) => Err(syn::Error::new_spanned(
                     lit_int,
                     format!(
-                        "Expecting int in regex to be parsable as `isize` ({}).",
-                        e.to_string()
+                        "Expecting int in regex to be parsable as `i32` ({e}).",
                     ),
                 )),
             },

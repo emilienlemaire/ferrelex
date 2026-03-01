@@ -4,6 +4,9 @@ members = [
   "ferrelex",
   "ferrelex_core",
   "ferrelex_macro",
-  "ferrelex_gen"
+  "ferrelex_gen",
 ]
 resolver = "3"
+
+[profile.bench]
+debug = true
