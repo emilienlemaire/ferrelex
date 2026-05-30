@@ -1,7 +1,8 @@
 [package]
 name = "ferrelex_macro"
-version = "0.2.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Procedural macro internals for ferrelex — not intended for direct use"
 keywords = ["lexer", "procedural-macro"]
 categories = ["development-tools::procedural-macro-helpers"]
@@ -13,7 +14,7 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = [ "full", "extra-traits", "visit", "visit-mut" ] }
-ferrelex_core = { path = "../ferrelex_core" }
+ferrelex_core = { path = "../ferrelex_core", version = "0.2" }
 rustc-hash = "2.1.1"
 
 [dev-dependencies]
