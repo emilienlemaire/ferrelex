@@ -3,13 +3,14 @@ name = "ferrelex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 description = "Write lexers using familiar Rust match syntax — patterns are compiled at build time"
 keywords = ["lexer", "lexical-analysis", "procedural-macro", "parsing"]
 categories = ["parsing", "text-processing", "development-tools::procedural-macro-helpers"]
 
 [dependencies]
-ferrelex_core = { path = "../ferrelex_core", version = "0.2" }
-ferrelex_macro = { path = "../ferrelex_macro", version = "0.2" }
+ferrelex_core = { path = "../ferrelex_core", version = "0.2.1" }
+ferrelex_macro = { path = "../ferrelex_macro", version = "0.2.1" }
 
 [dev-dependencies]
 macrotest = "1"

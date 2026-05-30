@@ -1,5 +1,10 @@
 # Ferrelex
 
+[![CI](https://github.com/emilienlemaire/ferrelex/actions/workflows/ci.yml/badge.svg)](https://github.com/emilienlemaire/ferrelex/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ferrelex.svg)](https://crates.io/crates/ferrelex)
+[![docs.rs](https://docs.rs/ferrelex/badge.svg)](https://docs.rs/ferrelex)
+[![License: LGPL-3.0](https://img.shields.io/badge/license-LGPL--3.0-blue.svg)](LICENSE)
+
 **Ferrelex** is a compile-time lexer generator for Rust. Describe token patterns as
 regex expressions and match arms inside the `lex!` macro; the macro compiles them into
 an efficient DFA at build time — no runtime regex engine, no heap allocation per token.
