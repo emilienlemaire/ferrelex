@@ -18,7 +18,7 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = [ "full", "extra-traits", "visit", "visit-mut" ] }
-ferrelex_core = { path = "../ferrelex_core", version = "0.2.1" }
+ferrelex_core = { path = "../ferrelex_core", version = "0.2.2" }
 rustc-hash = "2.1.1"
 
 [dev-dependencies]

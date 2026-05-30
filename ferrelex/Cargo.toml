@@ -12,8 +12,8 @@ keywords = ["lexer", "lexical-analysis", "procedural-macro", "parsing"]
 categories = ["parsing", "text-processing", "development-tools::procedural-macro-helpers"]
 
 [dependencies]
-ferrelex_core = { path = "../ferrelex_core", version = "0.2.1" }
-ferrelex_macro = { path = "../ferrelex_macro", version = "0.2.1" }
+ferrelex_core = { path = "../ferrelex_core", version = "0.2.2" }
+ferrelex_macro = { path = "../ferrelex_macro", version = "0.2.2" }
 
 [dev-dependencies]
 macrotest = "1"
