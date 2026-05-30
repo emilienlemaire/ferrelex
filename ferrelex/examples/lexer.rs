@@ -12,6 +12,7 @@ use ferrelex::{
 };
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum Token {
     Ascii(String),
     Lambda(String),
@@ -22,16 +23,13 @@ enum Token {
 lexer::lex! {
     const ASCII_LETTERS: Regex = ('a'..'z') | ('A'..'Z');
     const LAMBDA: Regex = "λ";
-    pub fn lex(lexbuf: &mut LexBuf) -> Token {
+    fn lex(lexbuf: &mut LexBuf) -> Token {
         #[lexer]
         match lexbuf {
             ASCII_LETTERS => Token::Ascii(lexbuf.lexeme()) ,
             LAMBDA => Token::Lambda(lexbuf.lexeme()),
             eof => Token::Eof,
-            _ => {
-                let _ = lexbuf.lexeme();
-                Token::Invalid
-            },
+            _ => Token::Invalid,
         }
     }
 }

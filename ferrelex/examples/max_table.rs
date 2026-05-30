@@ -294,7 +294,7 @@ lexer::lex! {
     const C508: Regex = '\u{02FC}'; const C509: Regex = '\u{02FD}';
     const C510: Regex = '\u{02FE}'; const C511: Regex = '\u{02FF}';
 
-    pub fn lex(lexbuf: &mut LexBuf) -> Token {
+    fn lex(lexbuf: &mut LexBuf) -> Token {
         #[lexer]
         match lexbuf {
             C000 => Token::Latin, C001 => Token::Latin, C002 => Token::Latin, C003 => Token::Latin,

@@ -1,6 +1,6 @@
 [package]
 name = "ferrelex_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Core runtime types for ferrelex — LexBuf, character sets, and Unicode data"
 keywords = ["lexer", "lexical-analysis", "parsing"]
